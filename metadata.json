@@ -1,0 +1,6 @@
+{
+  "name": "Gobble",
+  "description": "Extract website colors, fonts, assets, and CSS for inspection and export.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

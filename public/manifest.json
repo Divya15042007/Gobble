@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "Gobble Website Inspector",
+  "version": "1.0.0",
+  "description": "Extract and inspect the design system of the website in your active tab.",
+  "action": {
+    "default_title": "Open Gobble",
+    "default_popup": "index.html"
+  },
+  "permissions": [
+    "activeTab"
+  ],
+  "host_permissions": [],
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}
