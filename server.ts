@@ -5,6 +5,7 @@ import https from 'node:https';
 import dns from 'node:dns/promises';
 import net from 'node:net';
 import { createServer as createViteServer } from 'vite';
+import { extractWebsite } from './server/extractionEngine';
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
@@ -385,116 +386,17 @@ app.post('/api/extract', async (req: Request, res: Response) => {
     }
 
     const parsedUrl = await validatePreviewUrl(url);
-    url = parsedUrl.toString();
-
-    // Fetch normally first; use the compatibility retry only for broken local certificate chains.
-    const response = await fetchTargetHtml(url);
-
-    if (response.status < 200 || response.status >= 300) {
-      return res.status(response.status).json({
-        error: `Could not fetch target website (Status ${response.status}: ${response.statusText}).`,
-      });
-    }
-
-    const html = response.text;
-
-    // Extract Title
-    const titleMatch = html.match(/<title[^>]*>([^<]*)<\/title>/i);
-    const title = titleMatch ? titleMatch[1].trim() : parsedUrl.hostname;
-
-    // Extract Meta Description
-    const descMatch = html.match(/<meta[^>]+name=["']description["'][^>]+content=["']([^"']*)["']/i);
-    const description = descMatch ? descMatch[1].trim() : '';
-
-    // Extract Favicon
-    let favicon = '';
-    const iconMatch = html.match(/<link[^>]+rel=["'][^"']*icon[^"']*["'][^>]+href=["']([^"']*)["']/i);
-    if (iconMatch) {
-      favicon = iconMatch[1];
-      if (favicon.startsWith('//')) favicon = parsedUrl.protocol + favicon;
-      else if (favicon.startsWith('/')) favicon = `${parsedUrl.origin}${favicon}`;
-      else if (!favicon.startsWith('http')) favicon = `${parsedUrl.origin}/${favicon}`;
-    } else {
-      favicon = `${parsedUrl.origin}/favicon.ico`;
-    }
-
-    // Extract Hex Colors
-    const hexRegex = /#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})\b/g;
-    const allHexes = html.match(hexRegex) || [];
-    const colorCounts = new Map<string, number>();
-
-    allHexes.forEach(h => {
-      const norm = h.toLowerCase();
-      // Skip trivial alpha or non-standard
-      if (norm.length === 4 || norm.length === 7) {
-        colorCounts.set(norm, (colorCounts.get(norm) || 0) + 1);
-      }
-    });
-
-    // Extract Font Families
-    const fontRegex = /font-family\s*:\s*([^;!}]+)/gi;
-    const fontsFound = new Set<string>();
-    let fMatch;
-    while ((fMatch = fontRegex.exec(html)) !== null) {
-      const familyList = fMatch[1].split(',');
-      if (familyList.length > 0) {
-        const primary = familyList[0].trim().replace(/['"]/g, '');
-        if (primary && primary.length < 40 && !['inherit', 'initial', 'unset'].includes(primary.toLowerCase())) {
-          fontsFound.add(primary);
-        }
-      }
-    }
-
-    // Extract SVGs
-    const svgRegex = /<svg[\s\S]*?<\/svg>/gi;
-    const svgsFound: string[] = [];
-    let sMatch;
-    let count = 0;
-    while ((sMatch = svgRegex.exec(html)) !== null && count < 25) {
-      const raw = sMatch[0];
-      if (raw.length < 15000) { // filter out massive inline graphics
-        svgsFound.push(raw);
-        count++;
-      }
-    }
-
-    // Extract Image URLs
-    const imgRegex = /<img[^>]+src=["']([^"']+)["']/gi;
-    const imagesFound = new Set<string>();
-    let iMatch;
-    while ((iMatch = imgRegex.exec(html)) !== null && imagesFound.size < 30) {
-      let src = iMatch[1];
-      if (src.startsWith('//')) src = parsedUrl.protocol + src;
-      else if (src.startsWith('/')) src = `${parsedUrl.origin}${src}`;
-      else if (!src.startsWith('http') && !src.startsWith('data:')) src = `${parsedUrl.origin}/${src}`;
-      if (!src.startsWith('data:image')) {
-        imagesFound.add(src);
-      }
-    }
-
-    return res.json({
-      success: true,
-      url,
-      title,
-      description,
-      favicon,
-      rawColorCount: colorCounts.size,
-      colors: Array.from(colorCounts.entries())
-        .map(([hex, occurrences]) => {
-          const rgb = hexToRgb(hex) || { r: 128, g: 128, b: 128 };
-          const lum = getLuminance(rgb.r, rgb.g, rgb.b);
-          let role = 'accent';
-          if (lum < 0.1) role = 'background-dark';
-          else if (lum > 0.85) role = 'background-light';
-          else if (occurrences > 10) role = 'brand';
-          return { hex, occurrences, rgb, luminance: lum, role };
-        })
-        .sort((a, b) => b.occurrences - a.occurrences)
-        .slice(0, 50),
-      fonts: Array.from(fontsFound).slice(0, 15),
-      svgs: svgsFound,
-      images: Array.from(imagesFound),
-    });
+    const extraction = await extractWebsite(parsedUrl.toString());
+    const colors = extraction.colors.values.map((color, index) => ({
+      hex: color.value,
+      occurrences: color.usageCount,
+      rgb: color.value,
+      luminance: 0,
+      role: color.usage[0] || 'detected',
+      id: `color-${index}`,
+      evidence: color.evidence,
+    }));
+    return res.json({ ...extraction, title: extraction.metadata.title, description: extraction.metadata.description, favicon: extraction.metadata.favicon, rawColorCount: colors.length, colors });
   } catch (err: any) {
     console.error('Extraction error:', err);
     const causeCode = err?.cause?.code || err?.code;
@@ -504,9 +406,7 @@ app.post('/api/extract', async (req: Request, res: Response) => {
     if (causeCode === 'ENOTFOUND') {
       return res.status(502).json({ error: 'That website could not be found. Check the domain name and try again.' });
     }
-    return res.status(500).json({
-      error: 'Gobble could not read that website. It may block automated requests or require a browser login.',
-    });
+    return res.status(500).json({ error: err?.message || 'Gobble could not read that website.', warnings: err?.warnings || [] });
   }
 });
 

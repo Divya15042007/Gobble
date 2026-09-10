@@ -135,111 +135,74 @@ export default function App() {
 
       const data = await res.json();
 
-      // Transform response to ExtractedSite
-      const brandColor = data.colors[0]?.hex || '#6366F1';
-      const ramps = [generateColorRamp('Primary Brand', brandColor)];
-
       const extracted: ExtractedSite = {
         id: `extracted-${Date.now()}`,
         url: data.url,
-        name: data.title || new URL(data.url).hostname,
-        tagline: data.description || `Design system extracted from ${data.url}`,
-        description: data.description || '',
-        favicon: data.favicon || '',
-        themeColor: brandColor,
-        colors: data.colors.map((c: any, idx: number) => ({
-          id: `col-${idx}`,
-          hex: c.hex,
-          rgb: `rgb(${c.rgb.r}, ${c.rgb.g}, ${c.rgb.b})`,
-          hsl: `hsl(210, 50%, 50%)`,
-          name: `Color ${c.hex.toUpperCase()}`,
-          role: c.role,
-          occurrences: c.occurrences,
-          contrastOnLight: 4.5,
-          contrastOnDark: 7.2,
-          aaPassLight: true,
-          aaaPassLight: false,
-          aaPassDark: true,
-          aaaPassDark: true,
-          tailwindClass: `bg-[${c.hex.toLowerCase()}]`,
-        })),
-        colorRamps: ramps,
-        fonts: (data.fonts.length > 0 ? data.fonts : ['Inter']).map((f: string) => ({
-          family: f,
-          category: 'sans-serif',
-          weights: [400, 500, 600, 700],
-          fallbacks: ['system-ui', 'sans-serif'],
-          sizes: [
-            { label: 'Display Hero', sizePx: 56, rem: '3.5rem', lineHeight: '1.1', tracking: '-0.02em', sample: 'Extracted Display Typography', tailwindClass: 'text-5xl font-bold tracking-tight' },
-            { label: 'H1 Headline', sizePx: 38, rem: '2.375rem', lineHeight: '1.2', tracking: '-0.015em', sample: 'Section Headline', tailwindClass: 'text-4xl font-semibold' },
-            { label: 'Body Regular', sizePx: 16, rem: '1rem', lineHeight: '1.6', tracking: '0em', sample: 'Body content typography.', tailwindClass: 'text-base' },
-          ],
-          sampleText: 'Design system extracted live by Gobble.',
-        })),
-        assets: [
-          ...data.svgs.map((svg: string, idx: number) => ({
-            id: `svg-${idx}`,
-            name: `vector-asset-${idx + 1}`,
-            type: 'svg' as const,
-            src: `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`,
-            rawSvg: svg,
-            format: 'svg',
-            sizeKb: Math.round(svg.length / 1024 * 10) / 10,
-          })),
-          ...data.images.map((imgUrl: string, idx: number) => ({
-            id: `img-${idx}`,
-            name: `extracted-image-${idx + 1}`,
-            type: 'image' as const,
-            src: imgUrl,
-            format: 'image',
-            sizeKb: 45,
-          })),
-        ],
-        elements: [
-          {
-            id: 'el-extracted-root',
-            selector: '.site-hero-cta',
-            tag: 'button',
-            displayName: 'Primary Action CTA',
-            role: 'button',
-            bounds: { top: 320, left: 160, width: 200, height: 44 },
-            computed: {
-              color: '#FFFFFF',
-              backgroundColor: brandColor,
-              fontFamily: 'Inter, sans-serif',
-              fontSize: '15px',
-              fontWeight: '600',
-              lineHeight: '1.2',
-              letterSpacing: '-0.01em',
-              textAlign: 'center',
-              borderRadius: '8px',
-              borderWidth: '1px',
-              borderColor: 'transparent',
-              borderStyle: 'solid',
-              boxShadow: '0 4px 12px rgba(0, 0, 0, 0.25)',
-              transition: 'all 150ms ease',
-              opacity: '1',
-              display: 'inline-flex',
-              padding: { top: 12, right: 24, bottom: 12, left: 24 },
-              margin: { top: 20, right: 0, bottom: 0, left: 0 },
-              width: 200,
-              height: 44,
-            },
-            tailwindCode: `inline-flex items-center px-6 py-3 rounded-lg text-[15px] font-semibold text-white bg-[${brandColor.toLowerCase()}] shadow-lg`,
-            cssCode: `.site-hero-cta {\n  display: inline-flex;\n  padding: 12px 24px;\n  background-color: ${brandColor};\n  color: #fff;\n  border-radius: 8px;\n}`,
-            jsxCode: `<button className="px-6 py-3 rounded-lg bg-[${brandColor.toLowerCase()}] text-white font-semibold shadow-lg">\n  Get Started\n</button>`,
-            htmlCode: `<button class="site-hero-cta">Get Started</button>`,
-            scssCode: `$brand: ${brandColor};\n.site-hero-cta { background: $brand; padding: 12px 24px; }`,
-            contrastRatio: 5.2,
-            contrastLevel: 'AA',
-          },
-        ],
-        rawHtmlSnippet: `<div class="extracted-page">\n  <h1>${data.title}</h1>\n  <p>${data.description}</p>\n</div>`,
+        name: data.metadata?.title || new URL(data.url).hostname,
+        tagline: data.metadata?.description || 'Live website preview',
+        description: data.metadata?.description || '',
+        favicon: data.metadata?.favicon || '',
+        themeColor: '', colors: [], colorRamps: [], fonts: [], assets: [], elements: [], rawHtmlSnippet: '',
         extractedAt: new Date().toISOString(),
       };
 
+      const canonicalElements: InspectableElement[] = (data.dom?.elements || []).map((element: any) => {
+        const computed = element.computed || {};
+        const edges = (value: any) => value || { top: 0, right: 0, bottom: 0, left: 0 };
+        return {
+          id: element.id,
+          selector: element.selector,
+          tag: element.tag,
+          displayName: element.text || element.tag,
+          role: element.role,
+          bounds: { top: element.bounds.top, left: element.bounds.left, width: element.bounds.width, height: element.bounds.height },
+          computed: {
+            ...computed,
+            color: computed.color || '',
+            backgroundColor: computed.backgroundColor || '',
+            fontFamily: computed.fontFamily || '',
+            fontSize: computed.fontSize || '',
+            fontWeight: computed.fontWeight || '',
+            lineHeight: computed.lineHeight || '',
+            letterSpacing: computed.letterSpacing || '',
+            textAlign: computed.textAlign || '',
+            borderRadius: computed.borderRadius || '',
+            borderWidth: computed.borderWidth || '',
+            borderColor: computed.borderColor || '',
+            borderStyle: computed.borderStyle || '',
+            boxShadow: computed.boxShadow || '',
+            transition: computed.transition || '',
+            opacity: computed.opacity || '',
+            display: computed.display || '',
+            padding: edges(computed.padding),
+            margin: edges(computed.margin),
+            width: element.bounds.width,
+            height: element.bounds.height,
+          },
+          tailwindCode: '', cssCode: '', jsxCode: '', htmlCode: element.html || '', scssCode: '',
+          contrastRatio: 0, contrastLevel: 'Fail', html: element.html, outerHTML: element.html,
+          idAttribute: element.attributes?.find((attribute: any) => attribute.name === 'id')?.value,
+          classes: element.attributes?.find((attribute: any) => attribute.name === 'class')?.value?.split(/\s+/).filter(Boolean),
+          attributes: element.attributes,
+        };
+      });
+      extracted.elements = canonicalElements;
+      extracted.colors = (data.colors || []).map((color: any, idx: number) => ({
+        id: `col-${idx}`, hex: color.hex, rgb: color.hex, hsl: '', name: color.hex,
+        role: 'accent', occurrences: color.occurrences, contrastOnLight: 0, contrastOnDark: 0,
+        aaPassLight: false, aaaPassLight: false, aaPassDark: false, aaaPassDark: false, tailwindClass: '',
+      }));
+      extracted.colorRamps = data.colors?.[0]?.hex ? [generateColorRamp('Detected', data.colors[0].hex)] : [];
+      extracted.themeColor = data.colors?.[0]?.hex || '';
+      extracted.fonts = (data.typography?.fonts || []).map((font: any) => ({
+        family: font.family, category: 'sans-serif', weights: font.weights || [], fallbacks: font.declaredStack?.slice(1) || [],
+        sizes: (data.typography.usage?.find((usage: any) => usage.family === font.family)?.sizes || []).map((size: string) => ({ label: size, sizePx: Number.parseFloat(size) || 0, rem: `${(Number.parseFloat(size) || 0) / 16}rem`, lineHeight: '', tracking: '', sample: '', tailwindClass: '' })),
+        sampleText: canonicalElements.find(element => element.computed.fontFamily.includes(font.family))?.displayName || '',
+      }));
+      extracted.assets = (data.assets || []).map((asset: any) => ({ id: asset.id, name: asset.originalUrl || asset.type, type: asset.type === 'svg' ? 'svg' : asset.type === 'image' ? 'image' : 'video', src: asset.isInline && asset.rawSvg ? `data:image/svg+xml;utf8,${encodeURIComponent(asset.rawSvg)}` : asset.resolvedUrl, rawSvg: asset.rawSvg, dimensions: asset.width && asset.height ? { width: asset.width, height: asset.height } : undefined, format: asset.mimeType || asset.type }));
+      extracted.rawHtmlSnippet = canonicalElements[0]?.html || '';
       setCurrentSite(extracted);
-      setSelectedElement(extracted.elements[0] || null);
+      setSelectedElement(canonicalElements[0] || null);
       showToast(`Extracted ${extracted.colors.length} colors & ${extracted.assets.length} assets!`);
     } catch (err: any) {
       console.error(err);
