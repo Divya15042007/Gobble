@@ -104,11 +104,11 @@ export const HeaderBar: React.FC<HeaderBarProps> = ({
       <div className="flex items-center gap-3 shrink-0">
         <div className="flex items-center gap-2 group cursor-pointer" onClick={() => onSelectPreset(PRESET_SITES[0])}>
           <div className="brand-mark w-9 h-9 rounded-xl p-[1.5px] shadow-sm">
-            <div className="w-full h-full rounded-[10px] flex items-center justify-center">
-              <span className="font-extrabold text-sm tracking-tight text-white">
-                :⅁
-              </span>
-            </div>
+            <img
+              src="/icons/Gobble.png"
+              alt="Gobble"
+              className="w-full h-full rounded-[10px] object-cover"
+            />
           </div>
           <div className="hidden md:flex flex-col">
             <div className="flex items-center gap-1.5">

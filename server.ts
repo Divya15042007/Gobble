@@ -36,6 +36,11 @@ app.use((req: Request, res: Response, next) => {
 });
 
 // Health check
+app.get('/favicon.ico', (_req: Request, res: Response) => {
+  const iconRoot = process.env.NODE_ENV === 'production' ? 'dist' : 'public';
+  res.sendFile(path.join(process.cwd(), iconRoot, 'icons', 'Gobble.png'));
+});
+
 app.get('/api/health', (req: Request, res: Response) => {
   res.json({ status: 'ok', time: new Date().toISOString() });
 });
@@ -146,6 +151,17 @@ function rewriteCss(css: string, baseUrl: URL): string {
   });
 }
 
+function rewriteJavaScript(source: string, baseUrl: URL): string {
+  return source.replace(/(\b(?:from\s*|import\s*\(\s*|new\s+URL\s*\(\s*))(["'])([^"']+)\2/g, (match, prefix, quote, value) => {
+    if (/^(data:|blob:|about:|javascript:|mailto:|tel:|#)/i.test(value)) return match;
+    try {
+      return `${prefix}${quote}${previewUrl(new URL(value, baseUrl))}${quote}`;
+    } catch {
+      return match;
+    }
+  });
+}
+
 function rewriteHtml(html: string, baseUrl: URL): string {
   const attributes = /\b(?:href|src|action|poster|cite|data-src|data-url)\s*=\s*(["'])(.*?)\1/gi;
   const rewritten = html.replace(attributes, (match, quote, value) => {
@@ -186,11 +202,15 @@ function rewriteHtml(html: string, baseUrl: URL): string {
     };
     var nativeFetch=window.fetch;
     window.fetch=function(input,init){
+      var method=(init&&init.method)||(input instanceof Request?input.method:'GET');
+      var raw=typeof input==='string'||input instanceof URL?input.toString():input instanceof Request?input.url:'';
+      if(!/^GET$|^HEAD$/i.test(method)&&raw){return Promise.resolve(new Response('',{status:204,statusText:'Preview request skipped'}));}
       if(typeof input==='string'||input instanceof URL) input=local(input.toString());
+      else if(input instanceof Request) input=new Request(local(input.url),input);
       return nativeFetch.call(this,input,init);
     };
     var nativeOpen=XMLHttpRequest.prototype.open;
-    XMLHttpRequest.prototype.open=function(method,url){arguments[1]=local(url);return nativeOpen.apply(this,arguments)};
+    XMLHttpRequest.prototype.open=function(method,url){if(!/^GET$|^HEAD$/i.test(method)&&url){arguments[1]='data:,';}else{arguments[1]=local(url)}return nativeOpen.apply(this,arguments)};
     ['pushState','replaceState'].forEach(function(name){var native=history[name];history[name]=function(state,title,url){if(url)arguments[2]=local(url);return native.apply(this,arguments)}});
     var inspector={enabled:false,hovered:null,selected:null,hoverOverlay:null,hoverTooltip:null,selectedOverlay:null,selectedTooltip:null};
     var cssEscape=function(value){return window.CSS&&CSS.escape?CSS.escape(value):String(value).replace(/[^a-zA-Z0-9_-]/g,'\\\\$&')};
@@ -361,6 +381,8 @@ app.get('/api/preview', async (req: Request, res: Response) => {
       res.send(rewriteHtml(body.toString('utf8'), target));
     } else if (contentType.includes('text/css')) {
       res.send(rewriteCss(body.toString('utf8'), target));
+    } else if (contentType.includes('javascript') || contentType.includes('ecmascript')) {
+      res.send(rewriteJavaScript(body.toString('utf8'), target));
     } else {
       res.send(body);
     }
@@ -416,19 +438,21 @@ app.get('/api/proxy-asset', async (req: Request, res: Response) => {
     const assetUrl = req.query.url as string;
     if (!assetUrl) return res.status(400).send('Missing url parameter');
 
-    const fetchRes = await fetch(assetUrl, {
+    const target = await validatePreviewUrl(assetUrl);
+    const fetchRes = await fetch(target, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
       },
+      signal: AbortSignal.timeout(PREVIEW_TIMEOUT_MS),
     });
+    if (!fetchRes.ok) return res.status(fetchRes.status).send(`Asset returned ${fetchRes.status}.`);
 
     const contentType = fetchRes.headers.get('content-type') || 'application/octet-stream';
     res.setHeader('Content-Type', contentType);
-    res.setHeader('Cache-Control', 'public, max-age=86400');
-    const arrayBuffer = await fetchRes.arrayBuffer();
-    res.send(Buffer.from(arrayBuffer));
+    res.setHeader('Cache-Control', 'public, max-age=86400, immutable');
+    res.send(await readBoundedBody(fetchRes));
   } catch (e: any) {
-    res.status(500).send('Proxy error: ' + e.message);
+    res.status(400).send(e?.message || 'Proxy error.');
   }
 });
 
