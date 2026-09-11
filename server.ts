@@ -5,7 +5,7 @@ import https from 'node:https';
 import dns from 'node:dns/promises';
 import net from 'node:net';
 import { createServer as createViteServer } from 'vite';
-import { extractWebsite } from './server/extractionEngine';
+import { extractWebsite, ExtractionError } from './server/extractionEngine';
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
@@ -421,6 +421,13 @@ app.post('/api/extract', async (req: Request, res: Response) => {
     return res.json({ ...extraction, title: extraction.metadata.title, description: extraction.metadata.description, favicon: extraction.metadata.favicon, rawColorCount: colors.length, colors });
   } catch (err: any) {
     console.error('Extraction error:', err);
+    if (err instanceof ExtractionError) {
+      const status = err.code === 'PAGE_TIMEOUT' ? 504 : err.code === 'BROWSER_EXECUTABLE_MISSING' || err.code === 'BROWSER_LAUNCH_FAILED' ? 503 : 502;
+      const message = err.code === 'BROWSER_EXECUTABLE_MISSING' || err.code === 'BROWSER_LAUNCH_FAILED'
+        ? 'Gobble could not start its website inspection browser. Please try again later.'
+        : err.code === 'PAGE_TIMEOUT' ? 'The website took too long to respond. Check the URL and try again.' : 'Gobble could not load that website.';
+      return res.status(status).json({ error: message, code: err.code, warnings: err.warnings || [] });
+    }
     const causeCode = err?.cause?.code || err?.code;
     if (causeCode === 'UND_ERR_CONNECT_TIMEOUT' || /timed out/i.test(err?.message || '')) {
       return res.status(504).json({ error: 'The website took too long to respond. Check the URL and try again.' });

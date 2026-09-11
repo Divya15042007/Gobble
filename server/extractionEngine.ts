@@ -1,5 +1,7 @@
-import puppeteer, { Browser, HTTPRequest, Page } from 'puppeteer';
+import puppeteer, { Browser, BrowserContext, HTTPRequest, Page } from 'puppeteer';
 import dns from 'node:dns/promises';
+import fs from 'node:fs/promises';
+import path from 'node:path';
 import net from 'node:net';
 
 const NAVIGATION_TIMEOUT_MS = 25000;
@@ -29,6 +31,17 @@ export interface AssetEvidence { id: string; type: string; originalUrl: string; 
 export interface ResourceEvidence { url: string; type: string; status?: number; mimeType?: string; size?: number; firstParty: boolean; }
 
 let browserPromise: Promise<Browser> | undefined;
+export type ExtractionErrorCode = 'BROWSER_EXECUTABLE_MISSING' | 'BROWSER_LAUNCH_FAILED' | 'NAVIGATION_FAILED' | 'PAGE_TIMEOUT' | 'EXTRACTION_FAILED';
+
+export class ExtractionError extends Error {
+  readonly warnings: ExtractionWarning[];
+
+  constructor(public readonly code: ExtractionErrorCode, message: string, options?: { cause?: unknown; warnings?: ExtractionWarning[] }) {
+    super(message, options);
+    this.name = 'ExtractionError';
+    this.warnings = options?.warnings || [];
+  }
+}
 function isPrivateAddress(address: string): boolean {
   const normalized = address.toLowerCase().replace(/^::ffff:/, '');
   if (net.isIPv4(normalized)) { const [first, second] = normalized.split('.').map(Number); return first === 0 || first === 10 || first === 127 || (first === 169 && second === 254) || (first === 172 && second >= 16 && second <= 31) || (first === 192 && second === 168); }
@@ -45,14 +58,26 @@ async function assertPublicUrl(value: string): Promise<URL> {
 }
 async function getBrowser(): Promise<Browser> {
   if (!browserPromise) {
-    const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH || undefined;
-    browserPromise = puppeteer.launch({
-      executablePath,
-      headless: executablePath ? true : 'shell',
-      pipe: true,
-      timeout: 30000,
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-gpu', '--disable-dev-shm-usage'],
-    });
+    browserPromise = (async () => {
+      const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH || await puppeteer.executablePath();
+      try {
+        await fs.access(executablePath);
+      } catch (error) {
+        throw new ExtractionError('BROWSER_EXECUTABLE_MISSING', `Puppeteer Chrome executable is missing at ${executablePath}.`, { cause: error });
+      }
+      try {
+        await fs.mkdir(path.resolve(process.cwd(), '.cache', 'puppeteer-tmp'), { recursive: true });
+        return await puppeteer.launch({
+          executablePath,
+          headless: true,
+          pipe: true,
+          timeout: 30000,
+          args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-gpu', '--disable-dev-shm-usage'],
+        });
+      } catch (error: any) {
+        throw new ExtractionError('BROWSER_LAUNCH_FAILED', error?.message || 'Puppeteer could not launch Chrome.', { cause: error });
+      }
+    })();
   }
   try { return await browserPromise; } catch (error) { browserPromise = undefined; throw error; }
 }
@@ -96,17 +121,60 @@ async function inspectPage(page: Page, targetUrl: URL): Promise<any> {
 }
 
 export async function extractWebsite(input: string): Promise<CanonicalExtractionResult> {
-  const startedAt = Date.now(); const requested = await assertPublicUrl(input); const browser = await getBrowser(); const context = await browser.createBrowserContext(); const page = await context.newPage(); const warnings: ExtractionWarning[] = []; const resources = new Map<string, ResourceEvidence>();
-  await page.setViewport({ width: 1440, height: 1000, deviceScaleFactor: 1 }); await page.setRequestInterception(true);
-  page.on('request', async (request: HTTPRequest) => { try { await assertPublicUrl(request.url()); await request.continue(); } catch { await request.abort('blockedbyclient').catch(() => undefined); } });
-  page.on('response', response => { const url = response.url(); if (!resources.has(url)) resources.set(url, { url, type: response.request().resourceType(), status: response.status(), mimeType: response.headers()['content-type'], firstParty: new URL(url).origin === requested.origin }); });
+  const startedAt = Date.now();
+  const requested = await assertPublicUrl(input);
+  const warnings: ExtractionWarning[] = [];
+  const resources = new Map<string, ResourceEvidence>();
+  let context: BrowserContext | undefined;
+  let page: Page | undefined;
+
   try {
-    await page.goto(requested.toString(), { waitUntil: 'domcontentloaded', timeout: NAVIGATION_TIMEOUT_MS }); await page.waitForNetworkIdle({ idleTime: 500, timeout: SETTLE_TIMEOUT_MS }).catch(() => warnings.push({ type: 'NETWORK_IDLE_TIMEOUT', message: 'The page did not become network-idle before extraction.' })); await page.evaluate(async () => { await (document as any).fonts?.ready; });
-    const inspected = await inspectPage(page, requested); const finalUrl = await page.url(); await assertPublicUrl(finalUrl); const finalOrigin = new URL(finalUrl).origin;
+    const browser = await getBrowser();
+    context = await browser.createBrowserContext();
+    const extractionPage = page = await context.newPage();
+
+    await extractionPage.setViewport({ width: 1440, height: 1000, deviceScaleFactor: 1 });
+    await extractionPage.setRequestInterception(true);
+    extractionPage.on('request', async (request: HTTPRequest) => {
+      try {
+        await assertPublicUrl(request.url());
+        await request.continue();
+      } catch {
+        await request.abort('blockedbyclient').catch(() => undefined);
+      }
+    });
+    extractionPage.on('response', response => {
+      const url = response.url();
+      if (!resources.has(url)) {
+        resources.set(url, {
+          url,
+          type: response.request().resourceType(),
+          status: response.status(),
+          mimeType: response.headers()['content-type'],
+          firstParty: new URL(url).origin === requested.origin,
+        });
+      }
+    });
+
+    try {
+      await extractionPage.goto(requested.toString(), { waitUntil: 'domcontentloaded', timeout: NAVIGATION_TIMEOUT_MS });
+    } catch (error: any) {
+      const code = error?.name === 'TimeoutError' ? 'PAGE_TIMEOUT' : 'NAVIGATION_FAILED';
+      throw new ExtractionError(code, error?.message || 'The website could not be loaded.', { cause: error });
+    }
+    await extractionPage.waitForNetworkIdle({ idleTime: 500, timeout: SETTLE_TIMEOUT_MS }).catch(() => warnings.push({ type: 'NETWORK_IDLE_TIMEOUT', message: 'The page did not become network-idle before extraction.' })); await extractionPage.evaluate(async () => { await (document as any).fonts?.ready; });
+    const inspected = await inspectPage(extractionPage, requested); const finalUrl = await extractionPage.url(); await assertPublicUrl(finalUrl); const finalOrigin = new URL(finalUrl).origin;
     const colorMap = new Map<string, ColorEvidence>(); for (const item of inspected.colors) { if (!item.value || item.value === 'transparent' || item.value === 'none') continue; const key = item.value.trim().toLowerCase(); const existing = colorMap.get(key); if (existing) { existing.usageCount += 1; existing.usage.push(...item.usage); } else colorMap.set(key, { value: key, usageCount: 1, usage: [...item.usage], evidence: ['computed-style'] }); }
     const fontMap = new Map<string, FontEvidence>(); const usageMap = new Map<string, FontUsage>(); for (const use of inspected.fontUses) { const stack = String(use.family).split(',').map((family: string) => family.trim().replace(/^['"]|['"]$/g, '')).filter(Boolean); const family = stack[0]; if (!family) continue; const font = fontMap.get(family) || { family, declaredStack: stack, weights: [], sizes: [], evidence: ['computed-style'], confidence: 0.6 }; if (!font.weights.includes(use.weight)) font.weights.push(use.weight); if (!font.sizes.includes(use.size)) font.sizes.push(use.size); fontMap.set(family, font); const usage = usageMap.get(family) || { family, weights: [], sizes: [], usageCount: 0 }; usage.usageCount += 1; if (!usage.weights.includes(use.weight)) usage.weights.push(use.weight); if (!usage.sizes.includes(use.size)) usage.sizes.push(use.size); usageMap.set(family, usage); }
     for (const font of inspected.fonts) { const existing = fontMap.get(font.family); if (existing) { existing.evidence.push('document-fonts'); existing.confidence = Math.min(1, existing.confidence + 0.25); } }
     const assets: AssetEvidence[] = inspected.assets.map((asset: AssetEvidence, index: number) => ({ ...asset, id: `asset-${index}`, resolvedUrl: asset.resolvedUrl || finalUrl, isExternal: asset.isExternal || (asset.resolvedUrl ? new URL(asset.resolvedUrl).origin !== finalOrigin : false) }));
     return { success: true, url: finalUrl, metadata: { title: inspected.title || requested.hostname, description: inspected.description, favicon: inspected.favicon ? new URL(inspected.favicon, finalUrl).href : `${new URL(finalUrl).origin}/favicon.ico` }, page: { viewportWidth: 1440, viewportHeight: 1000, deviceScaleFactor: 1, width: inspected.dimensions.width, height: inspected.dimensions.height, scrollWidth: inspected.dimensions.scrollWidth, scrollHeight: inspected.dimensions.scrollHeight }, dom: { elements: inspected.elements, hiddenCount: inspected.hiddenCount }, typography: { fonts: [...fontMap.values()], usage: [...usageMap.values()] }, colors: { values: [...colorMap.values()] }, layout: { elements: inspected.elements, recurringSpacing: sortedUsage(inspected.spacing) }, borders: { radii: sortedUsage(inspected.radii), widths: sortedUsage(inspected.borderWidths) }, shadows: sortedUsage(inspected.shadows), assets, resources: [...resources.values()], cssVariables: sortedUsage(inspected.variables.map((item: any) => item.value)), warnings, stats: { elements: inspected.elements.length + inspected.hiddenCount, visibleElements: inspected.elements.length, assets: assets.length, resources: resources.size, durationMs: Date.now() - startedAt }, title: inspected.title || requested.hostname, description: inspected.description, favicon: inspected.favicon ? new URL(inspected.favicon, finalUrl).href : `${new URL(finalUrl).origin}/favicon.ico`, fonts: [...fontMap.keys()], images: assets.filter(asset => asset.type === 'image').map(asset => asset.resolvedUrl), svgs: assets.filter(asset => asset.type === 'svg' && asset.rawSvg).map(asset => asset.rawSvg as string) };
-  } catch (error: any) { warnings.push({ type: 'EXTRACTION_FAILED', message: error?.message || 'The page could not be extracted.' }); throw Object.assign(new Error(error?.message || 'The page could not be extracted.'), { warnings }); } finally { await page.close().catch(() => undefined); await context.close().catch(() => undefined); }
+  } catch (error: any) {
+    const extractionError = error instanceof ExtractionError ? error : new ExtractionError('EXTRACTION_FAILED', error?.message || 'The page could not be extracted.', { cause: error });
+    warnings.push({ type: extractionError.code, message: extractionError.message });
+    throw new ExtractionError(extractionError.code, extractionError.message, { cause: extractionError, warnings });
+  } finally {
+    await page?.close().catch(() => undefined);
+    await context?.close().catch(() => undefined);
+  }
 }

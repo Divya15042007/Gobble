@@ -42,6 +42,15 @@ npm start
 
 The build creates the client bundle and a bundled Express server in `dist/`.
 
+## Render Deployment
+
+This repository includes `render.yaml` with the production commands and health check.
+Render uses `npm ci && npm run build` to install the pinned Puppeteer Chrome revision,
+run the browser smoke test, and build the application. The start command is `npm start`.
+
+The web service does not require application secrets. Set `CORS_ORIGINS` only when an
+external browser extension or frontend origin needs to call the API.
+
 ## Chrome Extension
 
 The extension build keeps the existing popup, extraction workflow, live proxy preview,
